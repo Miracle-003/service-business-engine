@@ -1,0 +1,775 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DEACTIVATED
+}
+
+enum BusinessStatus {
+  DRAFT
+  ACTIVE
+  SUSPENDED
+  ARCHIVED
+}
+
+enum MembershipStatus {
+  INVITED
+  ACTIVE
+  SUSPENDED
+  REMOVED
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+}
+
+enum BusinessTypeStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum ServiceStatus {
+  DRAFT
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+}
+
+enum StaffStatus {
+  ACTIVE
+  INACTIVE
+  ON_LEAVE
+  ARCHIVED
+}
+
+enum CustomerStatus {
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CHECKED_IN
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+  DECLINED
+}
+
+enum BookingSource {
+  PLATFORM
+  BUSINESS
+  ADMIN
+  API
+}
+
+enum QuoteRequestStatus {
+  PENDING
+  REVIEWING
+  QUOTED
+  ACCEPTED
+  DECLINED
+  EXPIRED
+  CANCELLED
+}
+
+enum QuoteStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  DECLINED
+  EXPIRED
+  CANCELLED
+}
+
+enum ReviewStatus {
+  PENDING
+  PUBLISHED
+  HIDDEN
+  REJECTED
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  LOGIN
+  LOGOUT
+  INVITE
+  ACCEPT_INVITATION
+  STATUS_CHANGE
+  PERMISSION_CHANGE
+  OTHER
+}
+
+enum AuditActorType {
+  USER
+  SYSTEM
+  ADMIN
+}
+
+model User {
+  id        String     @id @default(uuid()) @db.Uuid
+  email     String     @unique
+  firstName String?
+  lastName  String?
+  phone     String?
+  avatarUrl String?
+  status    UserStatus @default(ACTIVE)
+
+  profile         Profile?
+  memberships     BusinessMembership[]
+  invitationsSent BusinessInvitation[] @relation("InvitationSender")
+  invitations     BusinessInvitation[] @relation("InvitationRecipient")
+
+  staffProfiles Staff[]
+  auditLogs     AuditLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([email])
+  @@index([status])
+}
+
+model Profile {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @unique @db.Uuid
+
+  bio         String?
+  timezone    String    @default("UTC")
+  locale      String    @default("en")
+  dateOfBirth DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Role {
+  id          String  @id @default(uuid()) @db.Uuid
+  name        String  @unique
+  description String?
+
+  memberships BusinessMembership[]
+  permissions RolePermission[]
+  invitations BusinessInvitation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Permission {
+  id          String  @id @default(uuid()) @db.Uuid
+  key         String  @unique
+  description String?
+
+  roles RolePermission[]
+
+  createdAt DateTime @default(now())
+}
+
+model RolePermission {
+  roleId       String @db.Uuid
+  permissionId String @db.Uuid
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+model BusinessType {
+  id          String             @id @default(uuid()) @db.Uuid
+  name        String             @unique
+  slug        String             @unique
+  description String?
+  status      BusinessTypeStatus @default(ACTIVE)
+
+  businesses Business[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Business {
+  id             String @id @default(uuid()) @db.Uuid
+  businessTypeId String @db.Uuid
+
+  name        String
+  slug        String         @unique
+  description String?
+  email       String?
+  phone       String?
+  websiteUrl  String?
+  logoUrl     String?
+  status      BusinessStatus @default(DRAFT)
+
+  businessType BusinessType @relation(fields: [businessTypeId], references: [id])
+
+  settings    BusinessSettings?
+  memberships BusinessMembership[]
+  invitations BusinessInvitation[]
+
+  locations BusinessLocation[]
+  hours     BusinessHours[]
+  holidays  BusinessHoliday[]
+
+  serviceCategories ServiceCategory[]
+  services          Service[]
+  staff             Staff[]
+
+  customers     Customer[]
+  bookings      Booking[]
+  quoteRequests QuoteRequest[]
+  quotes        Quote[]
+  reviews       Review[]
+
+  mediaAssets MediaAsset[]
+  auditLogs   AuditLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessTypeId])
+  @@index([status])
+}
+
+model BusinessSettings {
+  id         String @id @default(uuid()) @db.Uuid
+  businessId String @unique @db.Uuid
+
+  currency       String  @default("USD")
+  timezone       String  @default("UTC")
+  bookingEnabled Boolean @default(true)
+  quoteEnabled   Boolean @default(true)
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model BusinessMembership {
+  id         String           @id @default(uuid()) @db.Uuid
+  businessId String           @db.Uuid
+  userId     String           @db.Uuid
+  roleId     String           @db.Uuid
+  status     MembershipStatus @default(ACTIVE)
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role     Role     @relation(fields: [roleId], references: [id])
+
+  joinedAt  DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([businessId, userId])
+  @@index([userId])
+  @@index([businessId, status])
+}
+
+model BusinessInvitation {
+  id          String           @id @default(uuid()) @db.Uuid
+  businessId  String           @db.Uuid
+  email       String
+  roleId      String           @db.Uuid
+  invitedById String           @db.Uuid
+  userId      String?          @db.Uuid
+  status      InvitationStatus @default(PENDING)
+  tokenHash   String           @unique
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+
+  business  Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  role      Role     @relation(fields: [roleId], references: [id])
+  invitedBy User     @relation("InvitationSender", fields: [invitedById], references: [id])
+  user      User?    @relation("InvitationRecipient", fields: [userId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([businessId, status])
+  @@index([email])
+}
+
+model BusinessLocation {
+  id         String @id @default(uuid()) @db.Uuid
+  businessId String @db.Uuid
+
+  name         String
+  addressLine1 String
+  addressLine2 String?
+  city         String
+  state        String?
+  postalCode   String?
+  country      String
+  latitude     Decimal? @db.Decimal(10, 7)
+  longitude    Decimal? @db.Decimal(10, 7)
+  phone        String?
+  isPrimary    Boolean  @default(false)
+  isActive     Boolean  @default(true)
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  hours    BusinessHours[]
+  staff    StaffLocation[]
+  services ServiceLocation[]
+  bookings Booking[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId])
+  @@index([city, country])
+}
+
+model BusinessHours {
+  id         String  @id @default(uuid()) @db.Uuid
+  businessId String  @db.Uuid
+  locationId String? @db.Uuid
+
+  dayOfWeek Int
+  opensAt   String?
+  closesAt  String?
+  isClosed  Boolean @default(false)
+
+  business Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  location BusinessLocation? @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, dayOfWeek])
+  @@index([locationId, dayOfWeek])
+}
+
+model BusinessHoliday {
+  id         String @id @default(uuid()) @db.Uuid
+  businessId String @db.Uuid
+
+  date     DateTime
+  name     String
+  isClosed Boolean  @default(true)
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, date])
+}
+
+model ServiceCategory {
+  id         String @id @default(uuid()) @db.Uuid
+  businessId String @db.Uuid
+
+  name        String
+  slug        String
+  description String?
+  sortOrder   Int     @default(0)
+  isActive    Boolean @default(true)
+
+  business Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  services Service[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([businessId, slug])
+  @@index([businessId])
+}
+
+model Service {
+  id         String  @id @default(uuid()) @db.Uuid
+  businessId String  @db.Uuid
+  categoryId String? @db.Uuid
+
+  name            String
+  slug            String
+  description     String?
+  durationMinutes Int
+  price           Decimal       @db.Decimal(12, 2)
+  currency        String        @default("USD")
+  status          ServiceStatus @default(DRAFT)
+  sortOrder       Int           @default(0)
+
+  business Business         @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  category ServiceCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  locations    ServiceLocation[]
+  staff        ServiceStaff[]
+  bookingItems BookingItem[]
+  quoteItems   QuoteItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([businessId, slug])
+  @@index([businessId, status])
+}
+
+model ServiceLocation {
+  serviceId  String @db.Uuid
+  locationId String @db.Uuid
+
+  service  Service          @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  location BusinessLocation @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@id([serviceId, locationId])
+}
+
+model Staff {
+  id         String  @id @default(uuid()) @db.Uuid
+  businessId String  @db.Uuid
+  userId     String? @db.Uuid
+
+  firstName String
+  lastName  String?
+  email     String?
+  phone     String?
+  title     String?
+  bio       String?
+  avatarUrl String?
+  status    StaffStatus @default(ACTIVE)
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  user     User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  locations    StaffLocation[]
+  services     ServiceStaff[]
+  availability StaffAvailability[]
+  timeOff      StaffTimeOff[]
+
+  bookings Booking[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId, status])
+  @@index([userId])
+}
+
+model StaffLocation {
+  staffId    String @db.Uuid
+  locationId String @db.Uuid
+
+  staff    Staff            @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  location BusinessLocation @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@id([staffId, locationId])
+}
+
+model ServiceStaff {
+  serviceId String @db.Uuid
+  staffId   String @db.Uuid
+
+  service Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  staff   Staff   @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  @@id([serviceId, staffId])
+}
+
+model StaffAvailability {
+  id      String @id @default(uuid()) @db.Uuid
+  staffId String @db.Uuid
+
+  dayOfWeek Int
+  startsAt  String
+  endsAt    String
+  isActive  Boolean @default(true)
+
+  staff Staff @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  @@index([staffId, dayOfWeek])
+}
+
+model StaffTimeOff {
+  id      String @id @default(uuid()) @db.Uuid
+  staffId String @db.Uuid
+
+  startsAt DateTime
+  endsAt   DateTime
+  reason   String?
+
+  staff Staff @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  @@index([staffId, startsAt, endsAt])
+}
+
+model Customer {
+  id         String @id @default(uuid()) @db.Uuid
+  businessId String @db.Uuid
+
+  firstName String
+  lastName  String?
+  email     String?
+  phone     String?
+  status    CustomerStatus @default(ACTIVE)
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  addresses     CustomerAddress[]
+  notes         CustomerNote[]
+  preferences   CustomerPreference?
+  bookings      Booking[]
+  quoteRequests QuoteRequest[]
+  reviews       Review[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId])
+  @@index([businessId, email])
+  @@index([businessId, phone])
+}
+
+model CustomerAddress {
+  id         String @id @default(uuid()) @db.Uuid
+  customerId String @db.Uuid
+
+  label        String?
+  addressLine1 String
+  addressLine2 String?
+  city         String
+  state        String?
+  postalCode   String?
+  country      String
+  isPrimary    Boolean @default(false)
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([customerId])
+}
+
+model CustomerNote {
+  id         String  @id @default(uuid()) @db.Uuid
+  customerId String  @db.Uuid
+  authorId   String? @db.Uuid
+
+  content String
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([customerId])
+}
+
+model CustomerPreference {
+  id         String @id @default(uuid()) @db.Uuid
+  customerId String @unique @db.Uuid
+
+  notes                  String?
+  preferredStaffId       String?
+  preferredContactMethod String?
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+}
+
+model Booking {
+  id         String  @id @default(uuid()) @db.Uuid
+  businessId String  @db.Uuid
+  locationId String? @db.Uuid
+  customerId String  @db.Uuid
+  staffId    String? @db.Uuid
+
+  bookingNumber String        @unique
+  startsAt      DateTime
+  endsAt        DateTime
+  status        BookingStatus @default(PENDING)
+  source        BookingSource @default(PLATFORM)
+  customerNote  String?
+
+  business Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  location BusinessLocation? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  customer Customer          @relation(fields: [customerId], references: [id])
+  staff    Staff?            @relation(fields: [staffId], references: [id], onDelete: SetNull)
+
+  items         BookingItem[]
+  statusHistory BookingStatusHistory[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId, startsAt])
+  @@index([businessId, status])
+  @@index([customerId])
+  @@index([staffId, startsAt])
+}
+
+model BookingItem {
+  id        String @id @default(uuid()) @db.Uuid
+  bookingId String @db.Uuid
+  serviceId String @db.Uuid
+
+  serviceName     String
+  durationMinutes Int
+  unitPrice       Decimal @db.Decimal(12, 2)
+  quantity        Int     @default(1)
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  service Service @relation(fields: [serviceId], references: [id])
+
+  @@index([bookingId])
+}
+
+model BookingStatusHistory {
+  id        String @id @default(uuid()) @db.Uuid
+  bookingId String @db.Uuid
+
+  fromStatus  BookingStatus?
+  toStatus    BookingStatus
+  changedById String?        @db.Uuid
+  reason      String?
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([bookingId, createdAt])
+}
+
+model QuoteRequest {
+  id         String @id @default(uuid()) @db.Uuid
+  businessId String @db.Uuid
+  customerId String @db.Uuid
+
+  title       String
+  description String
+  status      QuoteRequestStatus @default(PENDING)
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer Customer @relation(fields: [customerId], references: [id])
+  quote    Quote?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId, status])
+  @@index([customerId])
+}
+
+model Quote {
+  id             String @id @default(uuid()) @db.Uuid
+  businessId     String @db.Uuid
+  quoteRequestId String @unique @db.Uuid
+
+  quoteNumber String      @unique
+  status      QuoteStatus @default(DRAFT)
+  subtotal    Decimal     @db.Decimal(12, 2)
+  total       Decimal     @db.Decimal(12, 2)
+  currency    String      @default("USD")
+  validUntil  DateTime?
+  notes       String?
+
+  business     Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  quoteRequest QuoteRequest @relation(fields: [quoteRequestId], references: [id], onDelete: Cascade)
+
+  items QuoteItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId, status])
+}
+
+model QuoteItem {
+  id        String  @id @default(uuid()) @db.Uuid
+  quoteId   String  @db.Uuid
+  serviceId String? @db.Uuid
+
+  description String
+  quantity    Int     @default(1)
+  unitPrice   Decimal @db.Decimal(12, 2)
+  total       Decimal @db.Decimal(12, 2)
+
+  quote   Quote    @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  service Service? @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+
+  @@index([quoteId])
+}
+
+model Review {
+  id         String  @id @default(uuid()) @db.Uuid
+  businessId String  @db.Uuid
+  customerId String  @db.Uuid
+  bookingId  String? @db.Uuid
+
+  rating  Int
+  title   String?
+  content String?
+  status  ReviewStatus @default(PENDING)
+
+  business Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer Customer        @relation(fields: [customerId], references: [id])
+  response ReviewResponse?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId, status])
+  @@index([customerId])
+}
+
+model ReviewResponse {
+  id       String  @id @default(uuid()) @db.Uuid
+  reviewId String  @unique @db.Uuid
+  content  String
+  authorId String? @db.Uuid
+
+  review Review @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model MediaAsset {
+  id         String @id @default(uuid()) @db.Uuid
+  businessId String @db.Uuid
+
+  bucket    String
+  path      String
+  fileName  String
+  mimeType  String?
+  sizeBytes Int?
+  altText   String?
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId])
+}
+
+model AuditLog {
+  id         String         @id @default(uuid()) @db.Uuid
+  businessId String?        @db.Uuid
+  actorId    String?        @db.Uuid
+  actorType  AuditActorType
+  action     AuditAction
+  entityType String?
+  entityId   String?
+  metadata   Json?
+
+  business Business? @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  actor    User?     @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@index([businessId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([entityType, entityId])
+}

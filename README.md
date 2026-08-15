@@ -34,3 +34,55 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+
+# Service Business Website Engine
+
+A multi-tenant service business management engine built as part of the Global Mobility Software Solutions vision.
+
+## Purpose
+
+The engine provides a common operational foundation for service-based businesses such as:
+
+- Salons
+- Barbers
+- Gyms
+- Cleaning companies
+- Wedding planners
+- Fitness studios
+- Other appointment and quote-based businesses
+
+## Current Version
+
+V1 — Core Engine
+
+## Technology
+
+- Next.js
+- TypeScript
+- React
+- Tailwind CSS
+- Prisma
+- PostgreSQL
+- Supabase
+
+## Architecture
+
+The platform follows a modular, service-oriented architecture designed for multi-tenancy, scalability, maintainability and future integration.
+
+## Roadmap
+
+### V1 — Core Engine
+Business management, services, staff, customers, bookings, quotes, reviews, administration.
+
+### V2 — Business Website Engine
+Templates, pages, sections, themes, domains and publishing.
+
+### V3 — Payments & Subscriptions
+Plans, subscriptions, billing and payments.
+
+### V4 — Advanced Automation
+Notifications, integrations, workflows and automation.
+
+### V5 — Scale
+Advanced infrastructure, analytics, performance and scaling.
