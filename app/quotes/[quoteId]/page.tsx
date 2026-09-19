@@ -1,0 +1,2 @@
+import { RecordDetail } from "@/src/components/feature/record-detail";
+export default async function QuoteDetailPage({ params }: { params: Promise<{ quoteId: string }> }) { const { quoteId } = await params; return <RecordDetail resource="quotes" recordId={quoteId} />; }

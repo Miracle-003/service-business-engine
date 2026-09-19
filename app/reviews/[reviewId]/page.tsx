@@ -1,0 +1,2 @@
+import { RecordDetail } from "@/src/components/feature/record-detail";
+export default async function ReviewDetailPage({ params }: { params: Promise<{ reviewId: string }> }) { const { reviewId } = await params; return <RecordDetail resource="reviews" recordId={reviewId} />; }

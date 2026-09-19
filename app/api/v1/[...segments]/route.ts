@@ -1,13 +1,14 @@
 import { handleV1Request } from "@/src/server/api/v1/routes";
 
 type ParamsContext = {
-  params: {
+  params: Promise<{
     segments?: string[];
-  };
+  }>;
 };
 
 async function run(request: Request, context: ParamsContext, method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE") {
-  return handleV1Request(request, context.params.segments ?? [], method);
+  const { segments } = await context.params;
+  return handleV1Request(request, segments ?? [], method);
 }
 
 export async function GET(request: Request, context: ParamsContext) {

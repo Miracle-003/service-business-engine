@@ -1,0 +1,2 @@
+import { BusinessConfigPage } from "@/src/components/feature/business-config";
+export default async function BusinessHolidaysPage({ params }: { params: Promise<{ businessId: string }> }) { const { businessId } = await params; return <BusinessConfigPage kind="holidays" businessId={businessId} />; }

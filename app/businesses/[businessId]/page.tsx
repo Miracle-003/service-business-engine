@@ -1,0 +1,2 @@
+import { BusinessDetail } from "@/src/components/feature/business-detail";
+export default async function BusinessDetailPage({ params }: { params: Promise<{ businessId: string }> }) { const { businessId } = await params; return <BusinessDetail businessId={businessId} />; }

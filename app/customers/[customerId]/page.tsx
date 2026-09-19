@@ -1,0 +1,2 @@
+import { RecordDetail } from "@/src/components/feature/record-detail";
+export default async function CustomerDetailPage({ params }: { params: Promise<{ customerId: string }> }) { const { customerId } = await params; return <RecordDetail resource="customers" recordId={customerId} />; }
