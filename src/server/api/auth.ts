@@ -6,6 +6,10 @@ export type AuthContext = {
   appUser: {
     id: string;
     email: string;
+    firstName: string | null;
+    lastName: string | null;
+    phone: string | null;
+    avatarUrl: string | null;
     status: string;
   };
 };
@@ -65,11 +69,15 @@ export async function requireAuth(request: Request): Promise<AuthContext> {
 
   const appUser = await prisma.user.findUnique({
     where: { id: authUser.id },
-    select: { id: true, email: true, status: true },
+    select: { id: true, email: true, firstName: true, lastName: true, phone: true, avatarUrl: true, status: true },
   });
 
   if (!appUser) {
     throw new ApiError(403, "USER_NOT_PROVISIONED", "Authenticated user is not provisioned in the application database");
+  }
+
+  if (appUser.status !== "ACTIVE") {
+    throw new ApiError(403, "FORBIDDEN", "Application user is not active");
   }
 
   return {

@@ -10,13 +10,19 @@ import { ThemeToggle } from "@/src/components/theme-toggle";
 import { useEffect, useState } from "react";
 
 const navigation = [
-  { label: "Overview", href: "/" },
-  { label: "Businesses", href: "/businesses" },
+  { label: "Overview", href: "/dashboard" },
+  { label: "Business", href: "/businesses" },
   { label: "Services", href: "/services" },
   { label: "Staff", href: "/staff" },
   { label: "Customers", href: "/customers" },
   { label: "Bookings", href: "/bookings" },
   { label: "Quotes", href: "/quotes" },
+];
+
+const adminNavigation = [
+  { label: "Activity", href: "/admin" },
+  { label: "Businesses", href: "/businesses" },
+  { label: "Account", href: "/account" },
 ];
 
 function Mark() {
@@ -30,7 +36,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   useTenant();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const authPage = pathname.startsWith("/auth");
-  const protectedPage = pathname !== "/" && !authPage;
+  const customerPage = pathname === "/";
+  const adminPage = pathname.startsWith("/admin");
+  const protectedPage = !customerPage && !authPage;
 
   useEffect(() => {
     if (protectedPage && auth.status === "unauthenticated") {
@@ -39,6 +47,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [auth.status, pathname, protectedPage, router]);
 
   if (authPage) return <main className="min-h-screen">{children}</main>;
+  if (customerPage) return <CustomerShell auth={auth}>{children}</CustomerShell>;
   if (protectedPage && auth.status === "loading") return <main className="min-h-screen p-5 sm:p-10"><LoadingState label="Verifying your session" /></main>;
   if (protectedPage && auth.status === "error") return <main className="mx-auto min-h-screen max-w-xl p-5 pt-24 sm:p-10"><ErrorState title="Unable to verify your session" description={auth.error.message} onRetry={auth.refresh} /></main>;
   if (protectedPage && auth.status === "unauthenticated") return <main className="min-h-screen" />;
@@ -50,7 +59,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <Mark />
           <span className="text-sm font-semibold tracking-wide text-white">ServiceOS</span>
         </Link>
-        <Navigation pathname={pathname} vertical />
+        <Navigation pathname={pathname} vertical items={adminPage ? adminNavigation : navigation} />
         <BusinessSelector />
         <div className="mt-auto px-3">
           <AuthSummary auth={auth} />
@@ -62,21 +71,25 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <div className="flex items-center gap-3"><button type="button" className="icon-button" aria-label="Open navigation" onClick={() => setMobileMenuOpen(true)}>☰</button><Link href="/" className="flex items-center gap-3"><Mark /><span className="text-sm font-semibold text-white">ServiceOS</span></Link></div>
           <div className="flex items-center gap-2"><ThemeToggle /><AuthSummary auth={auth} compact /></div>
         </header>
-        {mobileMenuOpen ? <div className="fixed inset-0 z-30 bg-black/55 lg:hidden" onClick={() => setMobileMenuOpen(false)}><aside className="h-full w-[min(19rem,86vw)] border-r border-white/10 bg-[#0d1220] p-5 shadow-2xl" onClick={(event) => event.stopPropagation()}><div className="mb-8 flex items-center justify-between"><Link href="/" className="flex items-center gap-3" onClick={() => setMobileMenuOpen(false)}><Mark /><span className="text-sm font-semibold text-white">ServiceOS</span></Link><button type="button" className="icon-button" aria-label="Close navigation" onClick={() => setMobileMenuOpen(false)}>×</button></div><Navigation pathname={pathname} vertical onNavigate={() => setMobileMenuOpen(false)} /><BusinessSelector /></aside></div> : null}
+        {mobileMenuOpen ? <div className="fixed inset-0 z-30 bg-black/55 lg:hidden" onClick={() => setMobileMenuOpen(false)}><aside className="h-full w-[min(19rem,86vw)] border-r border-white/10 bg-[#0d1220] p-5 shadow-2xl" onClick={(event) => event.stopPropagation()}><div className="mb-8 flex items-center justify-between"><Link href="/" className="flex items-center gap-3" onClick={() => setMobileMenuOpen(false)}><Mark /><span className="text-sm font-semibold text-white">ServiceOS</span></Link><button type="button" className="icon-button" aria-label="Close navigation" onClick={() => setMobileMenuOpen(false)}>×</button></div><Navigation pathname={pathname} items={adminPage ? adminNavigation : navigation} vertical onNavigate={() => setMobileMenuOpen(false)} />{adminPage ? null : <BusinessSelector />}</aside></div> : null}
         <div className="soft-grid pointer-events-none absolute inset-0 opacity-30" />
         <div className="relative flex-1 px-5 py-7 sm:px-8 sm:py-10 lg:px-12 lg:py-12"><div className="mb-6 hidden justify-end lg:flex"><ThemeToggle /></div>{children}</div>
         <div className="relative border-t border-white/8 px-5 py-4 lg:hidden">
-          <Navigation pathname={pathname} />
+          <Navigation pathname={pathname} items={adminPage ? adminNavigation : navigation} />
         </div>
       </main>
     </div>
   );
 }
 
-function Navigation({ pathname, vertical = false, onNavigate }: { pathname: string; vertical?: boolean; onNavigate?: () => void }) {
+function CustomerShell({ auth, children }: { auth: ReturnType<typeof useAuth>; children: React.ReactNode }) {
+  return <div className="customer-frame"><header className="customer-header"><Link href="/" className="brand-lockup"><Mark /><span>mirr</span></Link><nav className="customer-nav"><Link href="/">Discover</Link>{auth.status === "authenticated" ? <Link href="/account">My account</Link> : <Link href="/auth/login">Sign in</Link>}<Link href={auth.status === "authenticated" ? "/dashboard/onboarding" : "/auth/register"} className="header-cta">Start your business <span aria-hidden="true">↗</span></Link></nav><div className="customer-mobile-actions"><ThemeToggle />{auth.status === "authenticated" ? <Link href="/account" className="icon-button" aria-label="Open account">◎</Link> : <Link href="/auth/login" className="icon-button" aria-label="Sign in">→</Link>}</div></header><main>{children}</main><footer className="customer-footer"><span>mirr / service hub</span><span>For customers, makers, and the work between.</span></footer></div>;
+}
+
+function Navigation({ pathname, items, vertical = false, onNavigate }: { pathname: string; items: typeof navigation; vertical?: boolean; onNavigate?: () => void }) {
   return (
     <nav className={vertical ? "space-y-1" : "flex gap-2 overflow-x-auto pb-1"}>
-      {navigation.map((item) => {
+      {items.map((item) => {
         const active = pathname === item.href;
         return <Link key={item.href} href={item.href} onClick={onNavigate} className={`${vertical ? "flex w-full" : "shrink-0"} items-center rounded-xl px-3 py-2.5 text-sm transition ${active ? "bg-indigo-400/12 font-medium text-indigo-100 ring-1 ring-indigo-300/15" : "text-slate-400 hover:bg-white/5 hover:text-slate-200"}`}>{item.label}</Link>;
       })}

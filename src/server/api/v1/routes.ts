@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 
 import { prisma } from "@/src/lib/prisma";
@@ -18,6 +18,7 @@ import {
   ReviewStatus,
   ServiceStatus,
   StaffStatus,
+  UserStatus,
 } from "@/src/generated/prisma/enums";
 import { createAuditLog } from "@/src/server/api/audit";
 import { requireAuth, type AuthContext } from "@/src/server/api/auth";
@@ -49,6 +50,17 @@ const businessCreateSchema = z
   .strict();
 
 const businessUpdateSchema = businessCreateSchema.partial().strict();
+
+const businessTypeCreateSchema = z
+  .object({
+    name: z.string().min(1),
+    slug: z.string().min(1),
+    description: z.string().optional().nullable(),
+    status: z.nativeEnum(BusinessTypeStatus).optional(),
+  })
+  .strict();
+
+const businessTypeUpdateSchema = businessTypeCreateSchema.partial().strict();
 
 const businessSettingsUpsertSchema = z
   .object({
@@ -397,6 +409,55 @@ function buildListQuery(searchParams: URLSearchParams, allowedFilters: string[])
   return filters;
 }
 
+function validateListFilters(resource: string, filters: Record<string, string>) {
+  const enumFilters: Record<string, z.ZodTypeAny> = {
+    status:
+      resource === "services"
+        ? z.nativeEnum(ServiceStatus)
+        : resource === "staff"
+          ? z.nativeEnum(StaffStatus)
+          : resource === "customers"
+            ? z.nativeEnum(CustomerStatus)
+            : resource === "bookings"
+              ? z.nativeEnum(BookingStatus)
+              : resource === "quote-requests"
+                ? z.nativeEnum(QuoteRequestStatus)
+                : resource === "quotes"
+                  ? z.nativeEnum(QuoteStatus)
+                  : resource === "reviews"
+                    ? z.nativeEnum(ReviewStatus)
+                    : z.string(),
+    source: z.nativeEnum(BookingSource),
+    actorType: z.nativeEnum(AuditActorType),
+    action: z.nativeEnum(AuditAction),
+  };
+
+  for (const [key, schema] of Object.entries(enumFilters)) {
+    if (filters[key] !== undefined && resource !== "audit-logs" && (key === "actorType" || key === "action")) {
+      continue;
+    }
+    if (filters[key] !== undefined) {
+      parseSchema(schema, filters[key]);
+    }
+  }
+
+  for (const key of ["customerId", "staffId", "locationId", "categoryId", "quoteRequestId", "actorId", "entityId"]) {
+    if (filters[key] !== undefined) {
+      parseUuidOrThrow(filters[key], key);
+    }
+  }
+
+  for (const key of ["from", "to"]) {
+    if (filters[key] !== undefined) {
+      parseSchema(dateStringSchema, filters[key]);
+    }
+  }
+
+  if (filters.from && filters.to && new Date(filters.from).getTime() > new Date(filters.to).getTime()) {
+    throw new ApiError(422, "VALIDATION_ERROR", "from must be before or equal to to");
+  }
+}
+
 function parseDateOrder(start: string, end: string, startName: string, endName: string) {
   if (new Date(start).getTime() >= new Date(end).getTime()) {
     throw new ApiError(422, "VALIDATION_ERROR", `${startName} must be before ${endName}`);
@@ -427,6 +488,22 @@ async function ensureSharedBusinessAccess(viewerUserId: string, targetUserId: st
   if (!shared) {
     throw new ApiError(403, "FORBIDDEN", "No shared business membership with requested user");
   }
+}
+
+async function requireStaffInBusiness(staffId: string, businessId: string) {
+  const staff = await prisma.staff.findFirst({ where: { id: staffId, businessId } });
+  if (!staff) {
+    throw new ApiError(404, "NOT_FOUND", "Staff not found in business");
+  }
+  return staff;
+}
+
+async function requireCustomerInBusiness(customerId: string, businessId: string) {
+  const customer = await prisma.customer.findFirst({ where: { id: customerId, businessId } });
+  if (!customer) {
+    throw new ApiError(404, "NOT_FOUND", "Customer not found in business");
+  }
+  return customer;
 }
 
 function parseSegments(segments: string[] | undefined): string {
@@ -465,6 +542,12 @@ async function getBusinessScopedRecordOr404(model: keyof typeof prisma, idField:
 
 function permissionFromSegment(segment: string, action: "read" | "create" | "update" | "delete") {
   return `${segment}.${action}`;
+}
+
+function publicInvitation<T extends { tokenHash?: unknown }>(invitation: T) {
+  const safeInvitation = { ...invitation };
+  delete safeInvitation.tokenHash;
+  return safeInvitation;
 }
 
 const routes: RouteDefinition<RouteContext>[] = [
@@ -557,7 +640,7 @@ const routes: RouteDefinition<RouteContext>[] = [
         entityId: invitation.id,
       });
 
-      return ok({ invitation: accepted, membership });
+      return ok({ invitation: publicInvitation(accepted), membership });
     },
   },
   {
@@ -577,6 +660,7 @@ const routes: RouteDefinition<RouteContext>[] = [
             lastName: z.string().optional().nullable(),
             phone: z.string().optional().nullable(),
             avatarUrl: z.string().url().optional().nullable(),
+            status: z.nativeEnum(UserStatus).optional(),
           })
           .strict(),
       );
@@ -665,6 +749,13 @@ const routes: RouteDefinition<RouteContext>[] = [
     handler: async ({ context, searchParams }) => {
       await requireGlobalPermission(context.auth.authUserId, "businesses.read");
 
+      if (searchParams.get("status")) {
+        parseSchema(z.nativeEnum(BusinessStatus), searchParams.get("status"));
+      }
+      if (searchParams.get("businessTypeId")) {
+        parseUuidOrThrow(searchParams.get("businessTypeId") as string, "businessTypeId");
+      }
+
       const where: Prisma.BusinessWhereInput = {
         memberships: {
           some: {
@@ -673,6 +764,7 @@ const routes: RouteDefinition<RouteContext>[] = [
           },
         },
         ...(searchParams.get("status") ? { status: searchParams.get("status") as BusinessStatus } : {}),
+        ...(searchParams.get("businessTypeId") ? { businessTypeId: searchParams.get("businessTypeId") as string } : {}),
         ...(searchParams.get("search")
           ? {
               OR: [
@@ -695,7 +787,6 @@ const routes: RouteDefinition<RouteContext>[] = [
     method: "POST",
     pattern: "/businesses",
     handler: async ({ request, context }) => {
-      await requireGlobalPermission(context.auth.authUserId, "businesses.create");
       const body = await parseJsonBody(request, businessCreateSchema);
 
       const businessType = await prisma.businessType.findFirst({
@@ -705,22 +796,157 @@ const routes: RouteDefinition<RouteContext>[] = [
         throw new ApiError(404, "NOT_FOUND", "Business type not found or inactive");
       }
 
-      const business = await prisma.business.create({
+      const result = await prisma.$transaction(async (tx) => {
+        const ownerRole = await tx.role.findFirst({
+          where: {
+            name: {
+              equals: "OWNER",
+              mode: "insensitive",
+            },
+          },
+        });
+
+        if (!ownerRole) {
+          throw new ApiError(409, "OWNER_ROLE_NOT_CONFIGURED", "The canonical OWNER role is not configured");
+        }
+
+        const business = await tx.business.create({
+          data: {
+            ...body,
+            status: body.status ?? BusinessStatus.DRAFT,
+          },
+        });
+
+        const membership = await tx.businessMembership.create({
+          data: {
+            businessId: business.id,
+            userId: context.auth.authUserId,
+            roleId: ownerRole.id,
+            status: MembershipStatus.ACTIVE,
+          },
+          include: { role: true },
+        });
+
+        const settings = await tx.businessSettings.create({
+          data: { businessId: business.id },
+        });
+
+        await tx.auditLog.createMany({
+          data: [
+            {
+              businessId: business.id,
+              actorId: context.auth.authUserId,
+              actorType: AuditActorType.USER,
+              action: AuditAction.CREATE,
+              entityType: "Business",
+              entityId: business.id,
+            },
+            {
+              businessId: business.id,
+              actorId: context.auth.authUserId,
+              actorType: AuditActorType.USER,
+              action: AuditAction.CREATE,
+              entityType: "BusinessMembership",
+              entityId: membership.id,
+              metadata: { role: ownerRole.name },
+            },
+          ],
+        });
+
+        return { business, membership, settings };
+      });
+
+      return created(result);
+    },
+  },
+  {
+    method: "GET",
+    pattern: "/business-types",
+    handler: async ({ searchParams }) => {
+      const where: Prisma.BusinessTypeWhereInput = {
+        ...(searchParams.get("status") ? { status: searchParams.get("status") as BusinessTypeStatus } : {}),
+        ...(searchParams.get("search")
+          ? {
+              OR: [
+                { name: { contains: searchParams.get("search") ?? "", mode: "insensitive" } },
+                { slug: { contains: searchParams.get("search") ?? "", mode: "insensitive" } },
+              ],
+            }
+          : {}),
+      };
+
+      return listWithPagination(
+        ({ skip, take }) => prisma.businessType.findMany({ where, skip, take, orderBy: { name: "asc" } }),
+        () => prisma.businessType.count({ where }),
+        searchParams,
+      );
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/business-types",
+    handler: async ({ request, context }) => {
+      await requireGlobalPermission(context.auth.authUserId, "businesses.create");
+      const body = await parseJsonBody(request, businessTypeCreateSchema);
+      const businessType = await prisma.businessType.create({
         data: {
           ...body,
-          status: body.status ?? BusinessStatus.DRAFT,
+          status: body.status ?? BusinessTypeStatus.ACTIVE,
         },
       });
-
       await createAuditLog({
-        businessId: business.id,
         actorId: context.auth.authUserId,
         action: AuditAction.CREATE,
-        entityType: "Business",
-        entityId: business.id,
+        entityType: "BusinessType",
+        entityId: businessType.id,
       });
-
-      return created(business);
+      return created(businessType);
+    },
+  },
+  {
+    method: "GET",
+    pattern: "/business-types/:businessTypeId",
+    handler: async ({ context, params }) => {
+      await requireGlobalPermission(context.auth.authUserId, "businesses.read");
+      const businessTypeId = parseUuidOrThrow(params.businessTypeId, "businessTypeId");
+      const businessType = await prisma.businessType.findUnique({ where: { id: businessTypeId } });
+      if (!businessType) {
+        throw new ApiError(404, "NOT_FOUND", "Business type not found");
+      }
+      return ok(businessType);
+    },
+  },
+  {
+    method: "PATCH",
+    pattern: "/business-types/:businessTypeId",
+    handler: async ({ request, context, params }) => {
+      await requireGlobalPermission(context.auth.authUserId, "businesses.update");
+      const businessTypeId = parseUuidOrThrow(params.businessTypeId, "businessTypeId");
+      const body = await parseJsonBody(request, businessTypeUpdateSchema);
+      const businessType = await prisma.businessType.update({ where: { id: businessTypeId }, data: body });
+      await createAuditLog({
+        actorId: context.auth.authUserId,
+        action: AuditAction.UPDATE,
+        entityType: "BusinessType",
+        entityId: businessTypeId,
+      });
+      return ok(businessType);
+    },
+  },
+  {
+    method: "DELETE",
+    pattern: "/business-types/:businessTypeId",
+    handler: async ({ context, params }) => {
+      await requireGlobalPermission(context.auth.authUserId, "businesses.delete");
+      const businessTypeId = parseUuidOrThrow(params.businessTypeId, "businessTypeId");
+      await prisma.businessType.delete({ where: { id: businessTypeId } });
+      await createAuditLog({
+        actorId: context.auth.authUserId,
+        action: AuditAction.DELETE,
+        entityType: "BusinessType",
+        entityId: businessTypeId,
+      });
+      return noContent();
     },
   },
   {
@@ -786,6 +1012,14 @@ const routes: RouteDefinition<RouteContext>[] = [
           ...body,
         },
         update: body,
+      });
+
+      await createAuditLog({
+        businessId: params.businessId,
+        actorId: context.auth.authUserId,
+        action: AuditAction.UPDATE,
+        entityType: "BusinessSettings",
+        entityId: settings.id,
       });
 
       return ok(settings);
@@ -869,7 +1103,7 @@ const routes: RouteDefinition<RouteContext>[] = [
     method: "GET",
     pattern: "/businesses/:businessId/hours",
     handler: async ({ context, params, searchParams }) => {
-      await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "business_hours.read");
+      await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "hours.read");
       const where = {
         businessId: params.businessId,
         ...(searchParams.get("dayOfWeek") ? { dayOfWeek: Number(searchParams.get("dayOfWeek")) } : {}),
@@ -887,7 +1121,7 @@ const routes: RouteDefinition<RouteContext>[] = [
     method: "POST",
     pattern: "/businesses/:businessId/hours",
     handler: async ({ request, context, params }) => {
-      await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "business_hours.create");
+      await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "hours.create");
       const body = await parseJsonBody(request, hoursCreateSchema);
       if (!body.isClosed && body.opensAt && body.closesAt && body.opensAt >= body.closesAt) {
         throw new ApiError(422, "VALIDATION_ERROR", "opensAt must be before closesAt");
@@ -914,11 +1148,20 @@ const routes: RouteDefinition<RouteContext>[] = [
     method: "PATCH",
     pattern: "/businesses/:businessId/hours/:hoursId",
     handler: async ({ request, context, params }) => {
-      await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "business_hours.update");
+      await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "hours.update");
       const hoursId = parseUuidOrThrow(params.hoursId, "hoursId");
       const body = await parseJsonBody(request, hoursUpdateSchema);
 
       await prisma.businessHours.findFirstOrThrow({ where: { id: hoursId, businessId: params.businessId } });
+      if (!body.isClosed && body.opensAt && body.closesAt && body.opensAt >= body.closesAt) {
+        throw new ApiError(422, "VALIDATION_ERROR", "opensAt must be before closesAt");
+      }
+      if (body.locationId) {
+        const location = await prisma.businessLocation.findFirst({ where: { id: body.locationId, businessId: params.businessId } });
+        if (!location) {
+          throw new ApiError(404, "NOT_FOUND", "Location not found in business");
+        }
+      }
       const hours = await prisma.businessHours.update({ where: { id: hoursId }, data: body });
       return ok(hours);
     },
@@ -927,7 +1170,7 @@ const routes: RouteDefinition<RouteContext>[] = [
     method: "DELETE",
     pattern: "/businesses/:businessId/hours/:hoursId",
     handler: async ({ context, params }) => {
-      await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "business_hours.delete");
+      await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "hours.delete");
       const hoursId = parseUuidOrThrow(params.hoursId, "hoursId");
       await prisma.businessHours.findFirstOrThrow({ where: { id: hoursId, businessId: params.businessId } });
       await prisma.businessHours.delete({ where: { id: hoursId } });
@@ -938,7 +1181,7 @@ const routes: RouteDefinition<RouteContext>[] = [
     method: "GET",
     pattern: "/businesses/:businessId/holidays",
     handler: async ({ context, params, searchParams }) => {
-      await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "business_holidays.read");
+      await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "holidays.read");
 
       const where: Record<string, unknown> = { businessId: params.businessId };
       const fromDate = searchParams.get("fromDate");
@@ -961,7 +1204,7 @@ const routes: RouteDefinition<RouteContext>[] = [
     method: "POST",
     pattern: "/businesses/:businessId/holidays",
     handler: async ({ request, context, params }) => {
-      await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "business_holidays.create");
+      await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "holidays.create");
       const body = await parseJsonBody(request, holidayCreateSchema);
       const holiday = await prisma.businessHoliday.create({
         data: {
@@ -978,7 +1221,7 @@ const routes: RouteDefinition<RouteContext>[] = [
     method: "PATCH",
     pattern: "/businesses/:businessId/holidays/:holidayId",
     handler: async ({ request, context, params }) => {
-      await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "business_holidays.update");
+      await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "holidays.update");
       const holidayId = parseUuidOrThrow(params.holidayId, "holidayId");
       const body = await parseJsonBody(request, holidayUpdateSchema);
       await prisma.businessHoliday.findFirstOrThrow({ where: { id: holidayId, businessId: params.businessId } });
@@ -997,7 +1240,7 @@ const routes: RouteDefinition<RouteContext>[] = [
     method: "DELETE",
     pattern: "/businesses/:businessId/holidays/:holidayId",
     handler: async ({ context, params }) => {
-      await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "business_holidays.delete");
+      await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "holidays.delete");
       const holidayId = parseUuidOrThrow(params.holidayId, "holidayId");
       await prisma.businessHoliday.findFirstOrThrow({ where: { id: holidayId, businessId: params.businessId } });
       await prisma.businessHoliday.delete({ where: { id: holidayId } });
@@ -1100,6 +1343,13 @@ const routes: RouteDefinition<RouteContext>[] = [
       const membershipId = parseUuidOrThrow(params.membershipId, "membershipId");
       await prisma.businessMembership.findFirstOrThrow({ where: { id: membershipId, businessId: params.businessId } });
       await prisma.businessMembership.delete({ where: { id: membershipId } });
+      await createAuditLog({
+        businessId: params.businessId,
+        actorId: context.auth.authUserId,
+        action: AuditAction.DELETE,
+        entityType: "BusinessMembership",
+        entityId: membershipId,
+      });
       return noContent();
     },
   },
@@ -1115,7 +1365,24 @@ const routes: RouteDefinition<RouteContext>[] = [
       };
       return listWithPagination(
         ({ skip, take }) =>
-          prisma.businessInvitation.findMany({ where, skip, take, orderBy: { createdAt: "desc" } }),
+          prisma.businessInvitation.findMany({
+            where,
+            skip,
+            take,
+            orderBy: { createdAt: "desc" },
+            select: {
+              id: true,
+              businessId: true,
+              email: true,
+              roleId: true,
+              invitedById: true,
+              userId: true,
+              status: true,
+              expiresAt: true,
+              acceptedAt: true,
+              createdAt: true,
+            },
+          }),
         () => prisma.businessInvitation.count({ where }),
         searchParams,
       );
@@ -1156,7 +1423,7 @@ const routes: RouteDefinition<RouteContext>[] = [
         entityId: invitation.id,
       });
 
-      return created(invitation);
+      return created(publicInvitation(invitation));
     },
   },
   {
@@ -1169,14 +1436,14 @@ const routes: RouteDefinition<RouteContext>[] = [
       if (!invitation) {
         throw new ApiError(404, "NOT_FOUND", "Invitation not found");
       }
-      return ok(invitation);
+      return ok(publicInvitation(invitation));
     },
   },
   {
     method: "PATCH",
     pattern: "/businesses/:businessId/invitations/:invitationId/revoke",
     handler: async ({ context, params }) => {
-      await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "invitations.revoke");
+      await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "invitations.update");
       const invitationId = parseUuidOrThrow(params.invitationId, "invitationId");
       const invitation = await prisma.businessInvitation.findFirst({ where: { id: invitationId, businessId: params.businessId } });
       if (!invitation) {
@@ -1199,7 +1466,7 @@ const routes: RouteDefinition<RouteContext>[] = [
         entityId: invitationId,
       });
 
-      return ok(revoked);
+      return ok(publicInvitation(revoked));
     },
   },
 ];
@@ -1235,6 +1502,7 @@ async function crudBusinessResourceHandlers(args: {
       updateSchema?: z.ZodTypeAny;
       include?: Record<string, unknown>;
       listFilters?: string[];
+      searchFields?: string[];
       defaultOrderBy?: Record<string, "asc" | "desc">;
       beforeCreate?: (body: Record<string, unknown>, businessId: string) => Promise<void>;
       beforeUpdate?: (id: string, body: Record<string, unknown>, businessId: string) => Promise<void>;
@@ -1247,6 +1515,7 @@ async function crudBusinessResourceHandlers(args: {
       createSchema: serviceCreateSchema,
       updateSchema: serviceUpdateSchema,
       listFilters: ["status", "categoryId", "search"],
+      searchFields: ["name", "slug", "description"],
       defaultOrderBy: { createdAt: "desc" },
       beforeCreate: async (body, bId) => {
         if (body.categoryId) {
@@ -1272,6 +1541,7 @@ async function crudBusinessResourceHandlers(args: {
       createSchema: serviceCategoryCreateSchema,
       updateSchema: serviceCategoryUpdateSchema,
       listFilters: ["isActive", "search"],
+      searchFields: ["name", "slug", "description"],
       defaultOrderBy: { sortOrder: "asc" },
     },
     staff: {
@@ -1281,6 +1551,7 @@ async function crudBusinessResourceHandlers(args: {
       createSchema: staffCreateSchema,
       updateSchema: staffUpdateSchema,
       listFilters: ["status", "search"],
+      searchFields: ["firstName", "lastName", "email", "phone", "title"],
       defaultOrderBy: { createdAt: "desc" },
       beforeCreate: async (body) => {
         if (body.userId) {
@@ -1298,6 +1569,7 @@ async function crudBusinessResourceHandlers(args: {
       createSchema: customerCreateSchema,
       updateSchema: customerUpdateSchema,
       listFilters: ["status", "email", "phone", "search"],
+      searchFields: ["firstName", "lastName", "email", "phone"],
       defaultOrderBy: { createdAt: "desc" },
     },
     bookings: {
@@ -1307,7 +1579,22 @@ async function crudBusinessResourceHandlers(args: {
       createSchema: bookingCreateSchema,
       updateSchema: bookingUpdateSchema,
       listFilters: ["status", "customerId", "staffId", "locationId", "source", "from", "to"],
+      searchFields: ["bookingNumber", "customerNote"],
       defaultOrderBy: { startsAt: "desc" },
+      beforeUpdate: async (_id, body, bId) => {
+        if (body.customerId) {
+          await requireCustomerInBusiness(String(body.customerId), bId);
+        }
+        if (body.staffId) {
+          await requireStaffInBusiness(String(body.staffId), bId);
+        }
+        if (body.locationId) {
+          const location = await prisma.businessLocation.findFirst({ where: { id: String(body.locationId), businessId: bId } });
+          if (!location) {
+            throw new ApiError(404, "NOT_FOUND", "Location not found in business");
+          }
+        }
+      },
     },
     "quote-requests": {
       permissionBase: "quote_requests",
@@ -1316,6 +1603,7 @@ async function crudBusinessResourceHandlers(args: {
       createSchema: quoteRequestCreateSchema,
       updateSchema: quoteRequestUpdateSchema,
       listFilters: ["status", "customerId", "from", "to"],
+      searchFields: ["title", "description"],
       defaultOrderBy: { createdAt: "desc" },
     },
     quotes: {
@@ -1325,6 +1613,7 @@ async function crudBusinessResourceHandlers(args: {
       createSchema: quoteCreateSchema,
       updateSchema: quoteUpdateSchema,
       listFilters: ["status", "quoteRequestId", "from", "to"],
+      searchFields: ["quoteNumber", "notes"],
       defaultOrderBy: { createdAt: "desc" },
     },
     reviews: {
@@ -1334,6 +1623,7 @@ async function crudBusinessResourceHandlers(args: {
       createSchema: reviewCreateSchema,
       updateSchema: reviewUpdateSchema,
       listFilters: ["status", "customerId", "bookingId"],
+      searchFields: ["title", "content"],
       defaultOrderBy: { createdAt: "desc" },
     },
     media: {
@@ -1343,6 +1633,7 @@ async function crudBusinessResourceHandlers(args: {
       createSchema: mediaCreateSchema,
       updateSchema: mediaUpdateSchema,
       listFilters: ["bucket", "mimeType", "search"],
+      searchFields: ["fileName", "path", "altText"],
       defaultOrderBy: { createdAt: "desc" },
     },
     "audit-logs": {
@@ -1350,6 +1641,7 @@ async function crudBusinessResourceHandlers(args: {
       model: "auditLog",
       idParam: "auditLogId",
       listFilters: ["actorId", "actorType", "action", "entityType", "entityId", "from", "to"],
+      searchFields: ["entityType", "entityId"],
       defaultOrderBy: { createdAt: "desc" },
     },
   };
@@ -1377,6 +1669,7 @@ async function crudBusinessResourceHandlers(args: {
 
   if (action === "list") {
     const filterValues = buildListQuery(searchParams, config.listFilters ?? []);
+    validateListFilters(resource, filterValues);
 
     const where: Record<string, unknown> = { businessId };
     if (filterValues.status) {
@@ -1403,6 +1696,21 @@ async function crudBusinessResourceHandlers(args: {
     if (filterValues.mimeType) {
       where.mimeType = filterValues.mimeType;
     }
+    if (filterValues.actorId) {
+      where.actorId = filterValues.actorId;
+    }
+    if (filterValues.actorType) {
+      where.actorType = filterValues.actorType;
+    }
+    if (filterValues.action) {
+      where.action = filterValues.action;
+    }
+    if (filterValues.entityType) {
+      where.entityType = filterValues.entityType;
+    }
+    if (filterValues.entityId) {
+      where.entityId = filterValues.entityId;
+    }
     if (filterValues.roleId) {
       where.roleId = filterValues.roleId;
     }
@@ -1417,14 +1725,9 @@ async function crudBusinessResourceHandlers(args: {
     }
     if (filterValues.search) {
       const search = filterValues.search;
-      where.OR = [
-        { name: { contains: search, mode: "insensitive" } },
-        { slug: { contains: search, mode: "insensitive" } },
-        { title: { contains: search, mode: "insensitive" } },
-        { description: { contains: search, mode: "insensitive" } },
-        { fileName: { contains: search, mode: "insensitive" } },
-        { path: { contains: search, mode: "insensitive" } },
-      ];
+      where.OR = (config.searchFields ?? []).map((field) => ({
+        [field]: { contains: search, mode: "insensitive" },
+      }));
     }
 
     if (filterValues.from || filterValues.to) {
@@ -1495,7 +1798,7 @@ async function crudBusinessResourceHandlers(args: {
             locationId: bookingBody.locationId ?? null,
             customerId: bookingBody.customerId,
             staffId: bookingBody.staffId ?? null,
-            bookingNumber: `BKG-${Date.now()}`,
+            bookingNumber: `BKG-${randomUUID()}`,
             startsAt: new Date(bookingBody.startsAt),
             endsAt: new Date(bookingBody.endsAt),
             status: bookingBody.status ?? BookingStatus.PENDING,
@@ -1664,23 +1967,73 @@ async function crudBusinessResourceHandlers(args: {
 
     if (resource === "bookings") {
       const bookingBody = body as z.infer<typeof bookingUpdateSchema>;
-      if (bookingBody.startsAt && bookingBody.endsAt) {
-        parseDateOrder(bookingBody.startsAt, bookingBody.endsAt, "startsAt", "endsAt");
+      const bookingRecord = record as { startsAt: Date; endsAt: Date };
+      const nextStartsAt = bookingBody.startsAt ?? bookingRecord.startsAt.toISOString();
+      const nextEndsAt = bookingBody.endsAt ?? bookingRecord.endsAt.toISOString();
+      if (bookingBody.startsAt || bookingBody.endsAt) {
+        parseDateOrder(nextStartsAt, nextEndsAt, "startsAt", "endsAt");
       }
     }
 
-    const updatedRecord = await delegate.update({
-      where: { id: idValue },
-      data: body,
-    });
+    const updateData: Record<string, unknown> = { ...body };
+    if (resource === "bookings") {
+      if (typeof body.startsAt === "string") {
+        updateData.startsAt = new Date(body.startsAt);
+      }
+      if (typeof body.endsAt === "string") {
+        updateData.endsAt = new Date(body.endsAt);
+      }
+    }
+    if (resource === "quotes" && typeof body.validUntil === "string") {
+      updateData.validUntil = new Date(body.validUntil);
+    }
 
-    await createAuditLog({
-      businessId,
-      actorId: context.auth.authUserId,
-      action: AuditAction.UPDATE,
-      entityType: String(config.model),
-      entityId: idValue,
-    });
+    let updatedRecord: unknown;
+    if (resource === "bookings" && body.status !== undefined) {
+      const bookingRecord = record as { status: BookingStatus };
+      assertValidBookingStatusTransition(bookingRecord.status, body.status as BookingStatus);
+      updatedRecord = await prisma.$transaction(async (tx) => {
+        const updated = await tx.booking.update({
+          where: { id: idValue },
+          data: updateData,
+        });
+        await tx.bookingStatusHistory.create({
+          data: {
+            bookingId: idValue,
+            fromStatus: bookingRecord.status,
+            toStatus: body.status as BookingStatus,
+            changedById: context.auth.authUserId,
+            reason: "Booking updated",
+          },
+        });
+        await tx.auditLog.create({
+          data: {
+            businessId,
+            actorId: context.auth.authUserId,
+            actorType: AuditActorType.USER,
+            action: AuditAction.STATUS_CHANGE,
+            entityType: "Booking",
+            entityId: idValue,
+          },
+        });
+        return updated;
+      });
+    } else {
+      updatedRecord = await delegate.update({
+        where: { id: idValue },
+        data: updateData,
+      });
+    }
+
+    if (!(resource === "bookings" && body.status !== undefined)) {
+      await createAuditLog({
+        businessId,
+        actorId: context.auth.authUserId,
+        action: AuditAction.UPDATE,
+        entityType: String(config.model),
+        entityId: idValue,
+      });
+    }
 
     return ok(updatedRecord);
   }
@@ -1868,9 +2221,9 @@ async function handleSpecialRoute(method: string, path: string, routeContext: { 
       method: "GET",
       pattern: "/businesses/:businessId/staff/:staffId/availability",
       handler: async ({ context, params, searchParams }) => {
-        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "staff_availability.read");
+        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "staff.read");
         const staffId = parseUuidOrThrow(params.staffId, "staffId");
-        await prisma.staff.findFirstOrThrow({ where: { id: staffId, businessId: params.businessId } });
+        await requireStaffInBusiness(staffId, params.businessId);
 
         const where = {
           staffId,
@@ -1889,9 +2242,9 @@ async function handleSpecialRoute(method: string, path: string, routeContext: { 
       method: "POST",
       pattern: "/businesses/:businessId/staff/:staffId/availability",
       handler: async ({ request, context, params }) => {
-        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "staff_availability.create");
+        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "staff.update");
         const staffId = parseUuidOrThrow(params.staffId, "staffId");
-        await prisma.staff.findFirstOrThrow({ where: { id: staffId, businessId: params.businessId } });
+        await requireStaffInBusiness(staffId, params.businessId);
         const body = await parseJsonBody(request, staffAvailabilityCreateSchema);
         if (body.startsAt >= body.endsAt) {
           throw new ApiError(422, "VALIDATION_ERROR", "startsAt must be before endsAt");
@@ -1905,7 +2258,7 @@ async function handleSpecialRoute(method: string, path: string, routeContext: { 
       method: "PATCH",
       pattern: "/businesses/:businessId/staff/:staffId/availability/:availabilityId",
       handler: async ({ request, context, params }) => {
-        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "staff_availability.update");
+        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "staff.update");
         const staffId = parseUuidOrThrow(params.staffId, "staffId");
         const availabilityId = parseUuidOrThrow(params.availabilityId, "availabilityId");
         const body = await parseJsonBody(request, staffAvailabilityUpdateSchema);
@@ -1922,7 +2275,7 @@ async function handleSpecialRoute(method: string, path: string, routeContext: { 
       method: "DELETE",
       pattern: "/businesses/:businessId/staff/:staffId/availability/:availabilityId",
       handler: async ({ context, params }) => {
-        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "staff_availability.delete");
+        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "staff.update");
         const staffId = parseUuidOrThrow(params.staffId, "staffId");
         const availabilityId = parseUuidOrThrow(params.availabilityId, "availabilityId");
         const existing = await prisma.staffAvailability.findFirst({ where: { id: availabilityId, staffId } });
@@ -1938,9 +2291,9 @@ async function handleSpecialRoute(method: string, path: string, routeContext: { 
       method: "GET",
       pattern: "/businesses/:businessId/staff/:staffId/time-off",
       handler: async ({ context, params, searchParams }) => {
-        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "staff_timeoff.read");
+        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "staff.read");
         const staffId = parseUuidOrThrow(params.staffId, "staffId");
-        await prisma.staff.findFirstOrThrow({ where: { id: staffId, businessId: params.businessId } });
+        await requireStaffInBusiness(staffId, params.businessId);
 
         const where: Record<string, unknown> = { staffId };
         const from = searchParams.get("from");
@@ -1963,9 +2316,9 @@ async function handleSpecialRoute(method: string, path: string, routeContext: { 
       method: "POST",
       pattern: "/businesses/:businessId/staff/:staffId/time-off",
       handler: async ({ request, context, params }) => {
-        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "staff_timeoff.create");
+        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "staff.update");
         const staffId = parseUuidOrThrow(params.staffId, "staffId");
-        await prisma.staff.findFirstOrThrow({ where: { id: staffId, businessId: params.businessId } });
+        await requireStaffInBusiness(staffId, params.businessId);
         const body = await parseJsonBody(request, staffTimeOffCreateSchema);
         parseDateOrder(body.startsAt, body.endsAt, "startsAt", "endsAt");
 
@@ -1984,7 +2337,7 @@ async function handleSpecialRoute(method: string, path: string, routeContext: { 
       method: "PATCH",
       pattern: "/businesses/:businessId/staff/:staffId/time-off/:timeOffId",
       handler: async ({ request, context, params }) => {
-        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "staff_timeoff.update");
+        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "staff.update");
         const staffId = parseUuidOrThrow(params.staffId, "staffId");
         const timeOffId = parseUuidOrThrow(params.timeOffId, "timeOffId");
         const body = await parseJsonBody(request, staffTimeOffUpdateSchema);
@@ -2012,7 +2365,7 @@ async function handleSpecialRoute(method: string, path: string, routeContext: { 
       method: "DELETE",
       pattern: "/businesses/:businessId/staff/:staffId/time-off/:timeOffId",
       handler: async ({ context, params }) => {
-        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "staff_timeoff.delete");
+        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "staff.update");
         const staffId = parseUuidOrThrow(params.staffId, "staffId");
         const timeOffId = parseUuidOrThrow(params.timeOffId, "timeOffId");
         const existing = await prisma.staffTimeOff.findFirst({ where: { id: timeOffId, staffId } });
@@ -2027,9 +2380,9 @@ async function handleSpecialRoute(method: string, path: string, routeContext: { 
       method: "GET",
       pattern: "/businesses/:businessId/customers/:customerId/addresses",
       handler: async ({ context, params, searchParams }) => {
-        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "customer_addresses.read");
+        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "customers.read");
         const customerId = parseUuidOrThrow(params.customerId, "customerId");
-        await prisma.customer.findFirstOrThrow({ where: { id: customerId, businessId: params.businessId } });
+        await requireCustomerInBusiness(customerId, params.businessId);
 
         const where = {
           customerId,
@@ -2047,9 +2400,9 @@ async function handleSpecialRoute(method: string, path: string, routeContext: { 
       method: "POST",
       pattern: "/businesses/:businessId/customers/:customerId/addresses",
       handler: async ({ request, context, params }) => {
-        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "customer_addresses.create");
+        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "customers.update");
         const customerId = parseUuidOrThrow(params.customerId, "customerId");
-        await prisma.customer.findFirstOrThrow({ where: { id: customerId, businessId: params.businessId } });
+        await requireCustomerInBusiness(customerId, params.businessId);
         const body = await parseJsonBody(request, customerAddressCreateSchema);
         const address = await prisma.customerAddress.create({ data: { customerId, ...body } });
         return created(address);
@@ -2059,7 +2412,7 @@ async function handleSpecialRoute(method: string, path: string, routeContext: { 
       method: "PATCH",
       pattern: "/businesses/:businessId/customers/:customerId/addresses/:addressId",
       handler: async ({ request, context, params }) => {
-        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "customer_addresses.update");
+        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "customers.update");
         const customerId = parseUuidOrThrow(params.customerId, "customerId");
         const addressId = parseUuidOrThrow(params.addressId, "addressId");
         const body = await parseJsonBody(request, customerAddressUpdateSchema);
@@ -2076,7 +2429,7 @@ async function handleSpecialRoute(method: string, path: string, routeContext: { 
       method: "DELETE",
       pattern: "/businesses/:businessId/customers/:customerId/addresses/:addressId",
       handler: async ({ context, params }) => {
-        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "customer_addresses.delete");
+        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "customers.update");
         const customerId = parseUuidOrThrow(params.customerId, "customerId");
         const addressId = parseUuidOrThrow(params.addressId, "addressId");
         const existing = await prisma.customerAddress.findFirst({ where: { id: addressId, customerId } });
@@ -2092,9 +2445,9 @@ async function handleSpecialRoute(method: string, path: string, routeContext: { 
       method: "GET",
       pattern: "/businesses/:businessId/customers/:customerId/notes",
       handler: async ({ context, params, searchParams }) => {
-        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "customer_notes.read");
+        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "customers.read");
         const customerId = parseUuidOrThrow(params.customerId, "customerId");
-        await prisma.customer.findFirstOrThrow({ where: { id: customerId, businessId: params.businessId } });
+        await requireCustomerInBusiness(customerId, params.businessId);
 
         const where = {
           customerId,
@@ -2112,9 +2465,9 @@ async function handleSpecialRoute(method: string, path: string, routeContext: { 
       method: "POST",
       pattern: "/businesses/:businessId/customers/:customerId/notes",
       handler: async ({ request, context, params }) => {
-        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "customer_notes.create");
+        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "customers.update");
         const customerId = parseUuidOrThrow(params.customerId, "customerId");
-        await prisma.customer.findFirstOrThrow({ where: { id: customerId, businessId: params.businessId } });
+        await requireCustomerInBusiness(customerId, params.businessId);
         const body = await parseJsonBody(request, customerNoteCreateSchema);
         const note = await prisma.customerNote.create({
           data: {
@@ -2130,7 +2483,7 @@ async function handleSpecialRoute(method: string, path: string, routeContext: { 
       method: "DELETE",
       pattern: "/businesses/:businessId/customers/:customerId/notes/:noteId",
       handler: async ({ context, params }) => {
-        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "customer_notes.delete");
+        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "customers.update");
         const customerId = parseUuidOrThrow(params.customerId, "customerId");
         const noteId = parseUuidOrThrow(params.noteId, "noteId");
         const existing = await prisma.customerNote.findFirst({ where: { id: noteId, customerId } });
@@ -2146,9 +2499,9 @@ async function handleSpecialRoute(method: string, path: string, routeContext: { 
       method: "GET",
       pattern: "/businesses/:businessId/customers/:customerId/preferences",
       handler: async ({ context, params }) => {
-        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "customer_preferences.read");
+        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "customers.read");
         const customerId = parseUuidOrThrow(params.customerId, "customerId");
-        await prisma.customer.findFirstOrThrow({ where: { id: customerId, businessId: params.businessId } });
+        await requireCustomerInBusiness(customerId, params.businessId);
         const preferences = await prisma.customerPreference.findUnique({ where: { customerId } });
         return ok(preferences);
       },
@@ -2157,10 +2510,10 @@ async function handleSpecialRoute(method: string, path: string, routeContext: { 
       method: "PUT",
       pattern: "/businesses/:businessId/customers/:customerId/preferences",
       handler: async ({ request, context, params }) => {
-        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "customer_preferences.update");
+        await ensureBusinessAndPermission(context.auth.authUserId, params.businessId, "customers.update");
         const customerId = parseUuidOrThrow(params.customerId, "customerId");
         const body = await parseJsonBody(request, customerPreferenceUpsertSchema);
-        await prisma.customer.findFirstOrThrow({ where: { id: customerId, businessId: params.businessId } });
+        await requireCustomerInBusiness(customerId, params.businessId);
 
         if (body.preferredStaffId) {
           const staff = await prisma.staff.findFirst({ where: { id: body.preferredStaffId, businessId: params.businessId } });

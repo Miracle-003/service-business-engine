@@ -8,6 +8,10 @@ import { getSupabaseBrowserClient } from "@/src/lib/supabase-browser";
 export type AuthUser = {
   id: string;
   email: string;
+  firstName: string | null;
+  lastName: string | null;
+  phone: string | null;
+  avatarUrl: string | null;
   status: string;
 };
 

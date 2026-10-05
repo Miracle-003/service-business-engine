@@ -56,7 +56,13 @@ export function AuthPanel({ mode }: { mode: AuthMode }) {
         setMessage("Password updated. You can now sign in.");
       }
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "Unable to reach the authentication service");
+      setError(
+        submitError instanceof TypeError && submitError.message.toLowerCase().includes("fetch")
+          ? "Authentication service is unreachable. Check your internet/DNS connection, then try again."
+          : submitError instanceof Error
+            ? submitError.message
+            : "Unable to reach the authentication service",
+      );
     } finally {
       setBusy(false);
     }
