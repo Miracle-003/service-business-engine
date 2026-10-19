@@ -886,7 +886,7 @@ const routes: RouteDefinition<RouteContext>[] = [
     method: "POST",
     pattern: "/business-types",
     handler: async ({ request, context }) => {
-      await requireGlobalPermission(context.auth.authUserId, "businesses.create");
+      await requireGlobalPermission(context.auth.authUserId, "businesses.update");
       const body = await parseJsonBody(request, businessTypeCreateSchema);
       const businessType = await prisma.businessType.create({
         data: {
